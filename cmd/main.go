@@ -21,6 +21,7 @@ import (
 var (
 	kubeconfigPath string
 	namespaces     string
+	healCooldown   time.Duration
 )
 
 // rootCmd represents the base command when called without any subcommands
@@ -47,6 +48,8 @@ func init() {
 	// Global flags handled by Cobra
 	rootCmd.PersistentFlags().StringVarP(&kubeconfigPath, "kubeconfig", "k", "", "Path to the kubeconfig file (defaults to standard locations).")
 	rootCmd.PersistentFlags().StringVarP(&namespaces, "namespaces", "n", "", "Comma-separated list of namespaces/workspaces to watch (e.g., 'prod,staging'). Supports wildcards (*). Defaults to all namespaces if empty.")
+	rootCmd.PersistentFlags().DurationVar(&healCooldown, "heal-cooldown", 10*time.Minute,
+		"Minimum time between healing the same Pod (e.g. 10m, 30s).")
 }
 
 // resolveWildcardNamespaces connects to the cluster, lists all namespaces, and returns a concrete list
@@ -147,6 +150,7 @@ func startHealer() {
 		os.Exit(1)
 	}
 
+	healer.HealCooldown = healCooldown
 	// Setup signal handling (SIGINT/Ctrl+C and SIGTERM) for graceful shutdown.
 	termCh := make(chan os.Signal, 1)
 	signal.Notify(termCh, syscall.SIGINT, syscall.SIGTERM)

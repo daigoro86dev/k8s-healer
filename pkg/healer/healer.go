@@ -18,9 +18,11 @@ import (
 
 // Healer holds the Kubernetes client and configuration for watching.
 type Healer struct {
-	ClientSet  *kubernetes.Clientset
-	Namespaces []string
-	StopCh     chan struct{}
+	ClientSet    *kubernetes.Clientset
+	Namespaces   []string
+	StopCh       chan struct{}
+	HealedPods   map[string]time.Time // Tracks recently healed pods
+	HealCooldown time.Duration
 }
 
 // NewHealer initializes the Kubernetes client configuration using kubeconfig or in-cluster settings.
@@ -48,9 +50,11 @@ func NewHealer(kubeconfigPath string, namespaces []string) (*Healer, error) {
 	}
 
 	return &Healer{
-		ClientSet:  clientset,
-		Namespaces: namespaces,
-		StopCh:     make(chan struct{}),
+		ClientSet:    clientset,
+		Namespaces:   namespaces,
+		StopCh:       make(chan struct{}),
+		HealedPods:   make(map[string]time.Time),
+		HealCooldown: 10 * time.Minute, // default cooldown
 	}, nil
 }
 
@@ -63,6 +67,8 @@ func (h *Healer) Watch() {
 	}
 
 	fmt.Printf("Starting healer to watch namespaces: [%s]\n", strings.Join(h.Namespaces, ", "))
+
+	h.startHealCacheCleaner()
 
 	// Start a separate goroutine for the informer watch in each namespace
 	for _, ns := range h.Namespaces {
@@ -102,24 +108,54 @@ func (h *Healer) watchSingleNamespace(namespace string) {
 
 // checkAndHealPod checks a Pod's health and executes deletion if necessary.
 func (h *Healer) checkAndHealPod(pod *v1.Pod) {
-	// Safety check: only heal Pods that are managed by a controller (Deployment, DaemonSet, etc.)
-	// Unmanaged pods (where OwnerReferences is empty) should not be deleted, as they won't be recreated.
+	// Skip unmanaged pods
 	if len(pod.OwnerReferences) == 0 {
 		return
 	}
 
-	// Use the utility function to determine if the pod is unhealthy
+	// Skip if recently healed
+	podKey := fmt.Sprintf("%s/%s", pod.Namespace, pod.Name)
+	if lastHeal, ok := h.HealedPods[podKey]; ok {
+		if time.Since(lastHeal) < h.HealCooldown {
+			fmt.Printf("   [SKIP] ⏳ Pod %s was healed %.0f seconds ago — skipping re-heal.\n",
+				podKey, time.Since(lastHeal).Seconds())
+			return
+		}
+	}
+
 	if util.IsUnhealthy(pod) {
 		reason := util.GetHealReason(pod)
-
 		fmt.Printf("\n!!! HEALING ACTION REQUIRED !!!\n")
-		fmt.Printf("    Pod: %s/%s\n", pod.Namespace, pod.Name)
+		fmt.Printf("    Pod: %s\n", podKey)
 		fmt.Printf("    Reason: %s\n", reason)
 
 		h.triggerPodDeletion(pod)
 
+		// Record the healing timestamp
+		h.HealedPods[podKey] = time.Now()
+
 		fmt.Printf("!!! HEALING ACTION COMPLETE !!!\n\n")
 	}
+}
+
+func (h *Healer) startHealCacheCleaner() {
+	ticker := time.NewTicker(30 * time.Minute)
+	go func() {
+		for {
+			select {
+			case <-ticker.C:
+				now := time.Now()
+				for key, t := range h.HealedPods {
+					if now.Sub(t) > 2*h.HealCooldown {
+						delete(h.HealedPods, key)
+					}
+				}
+			case <-h.StopCh:
+				ticker.Stop()
+				return
+			}
+		}
+	}()
 }
 
 // triggerPodDeletion deletes the Pod, relying on the managing controller to recreate a fresh one.
