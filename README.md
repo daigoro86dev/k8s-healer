@@ -94,8 +94,7 @@ By default, the tool authenticates using your local **Kubeconfig** file
 
   `--heal-cooldown`    Minimum duration between healing  `--heal-cooldown 5m`
                        the same Pod. Default: `10m`.     
-  ------------------------------------------------------------------------------
-
+  
 ------------------------------------------------------------------------
 
 ### 💡 Examples
